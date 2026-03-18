@@ -35,6 +35,7 @@ class Logger:
         self.num_envs = num_envs
         self.gpu_world_size = gpu_world_size
         self.device = device
+        self.enable_print = cfg.get("enable_print", True)
         self.git_status_repos = [rsl_rl.__file__]
         self.tot_timesteps = 0
         self.tot_time = 0
@@ -178,52 +179,53 @@ class Logger:
                         "Train/mean_episode_length/time", statistics.mean(self.lenbuffer), int(self.tot_time)
                     )
 
-            # Print to console
-            log_string = f"""{"#" * width}\n"""
-            log_string += f"""\033[1m{f" Learning iteration {it}/{total_it} ".center(width)}\033[0m \n\n"""
+            if self.enable_print:
+                # Print to console
+                log_string = f"""{"#" * width}\n"""
+                log_string += f"""\033[1m{f" Learning iteration {it}/{total_it} ".center(width)}\033[0m \n\n"""
 
-            # Print run name if provided
-            run_name = self.cfg.get("run_name")
-            log_string += f"""{"Run name:":>{pad}} {run_name}\n""" if run_name else ""
+                # Print run name if provided
+                run_name = self.cfg.get("run_name")
+                log_string += f"""{"Run name:":>{pad}} {run_name}\n""" if run_name else ""
 
-            # Print performance
-            log_string += (
-                f"""{"Total steps:":>{pad}} {self.tot_timesteps} \n"""
-                f"""{"Steps per second:":>{pad}} {fps:.0f} \n"""
-                f"""{"Collection time:":>{pad}} {collect_time:.3f}s \n"""
-                f"""{"Learning time:":>{pad}} {learn_time:.3f}s \n"""
-            )
+                # Print performance
+                log_string += (
+                    f"""{"Total steps:":>{pad}} {self.tot_timesteps} \n"""
+                    f"""{"Steps per second:":>{pad}} {fps:.0f} \n"""
+                    f"""{"Collection time:":>{pad}} {collect_time:.3f}s \n"""
+                    f"""{"Learning time:":>{pad}} {learn_time:.3f}s \n"""
+                )
 
-            # Print losses
-            for key, value in loss_dict.items():
-                log_string += f"""{f"Mean {key} loss:":>{pad}} {value:.4f}\n"""
+                # Print losses
+                for key, value in loss_dict.items():
+                    log_string += f"""{f"Mean {key} loss:":>{pad}} {value:.4f}\n"""
 
-            # Print rewards and episode length
-            if len(self.rewbuffer) > 0:
-                if self.cfg["algorithm"]["rnd_cfg"]:
-                    log_string += f"""{"Mean extrinsic reward:":>{pad}} {statistics.mean(self.erewbuffer):.2f}\n"""
-                    log_string += f"""{"Mean intrinsic reward:":>{pad}} {statistics.mean(self.irewbuffer):.2f}\n"""
-                log_string += f"""{"Mean reward:":>{pad}} {statistics.mean(self.rewbuffer):.2f}\n"""
-                log_string += f"""{"Mean episode length:":>{pad}} {statistics.mean(self.lenbuffer):.2f}\n"""
+                # Print rewards and episode length
+                if len(self.rewbuffer) > 0:
+                    if self.cfg["algorithm"]["rnd_cfg"]:
+                        log_string += f"""{"Mean extrinsic reward:":>{pad}} {statistics.mean(self.erewbuffer):.2f}\n"""
+                        log_string += f"""{"Mean intrinsic reward:":>{pad}} {statistics.mean(self.irewbuffer):.2f}\n"""
+                    log_string += f"""{"Mean reward:":>{pad}} {statistics.mean(self.rewbuffer):.2f}\n"""
+                    log_string += f"""{"Mean episode length:":>{pad}} {statistics.mean(self.lenbuffer):.2f}\n"""
 
-            # Print noise std
-            log_string += f"""{"Mean action noise std:":>{pad}} {action_std.mean().item():.2f}\n"""
+                # Print noise std
+                log_string += f"""{"Mean action noise std:":>{pad}} {action_std.mean().item():.2f}\n"""
 
-            # Print episode extras
-            if not print_minimal:
-                log_string += extras_string
+                # Print episode extras
+                if not print_minimal:
+                    log_string += extras_string
 
-            # Print footer
-            done_it = it + 1 - start_it
-            remaining_it = total_it - start_it - done_it
-            eta = self.tot_time / done_it * remaining_it
-            log_string += (
-                f"""{"-" * width}\n"""
-                f"""{"Iteration time:":>{pad}} {iteration_time:.2f}s\n"""
-                f"""{"Time elapsed:":>{pad}} {time.strftime("%H:%M:%S", time.gmtime(self.tot_time))}\n"""
-                f"""{"ETA:":>{pad}} {time.strftime("%H:%M:%S", time.gmtime(eta))}\n"""
-            )
-            print(log_string)
+                # Print footer
+                done_it = it + 1 - start_it
+                remaining_it = total_it - start_it - done_it
+                eta = self.tot_time / done_it * remaining_it
+                log_string += (
+                    f"""{"-" * width}\n"""
+                    f"""{"Iteration time:":>{pad}} {iteration_time:.2f}s\n"""
+                    f"""{"Time elapsed:":>{pad}} {time.strftime("%H:%M:%S", time.gmtime(self.tot_time))}\n"""
+                    f"""{"ETA:":>{pad}} {time.strftime("%H:%M:%S", time.gmtime(eta))}\n"""
+                )
+                print(log_string)
 
             # Clear extras buffer
             self.ep_extras.clear()
