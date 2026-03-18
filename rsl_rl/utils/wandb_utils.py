@@ -22,7 +22,7 @@ class WandbSummaryWriter(SummaryWriter):
         super().__init__(log_dir, flush_secs)
 
         # Get the run name
-        run_name = os.path.split(log_dir)[-1]
+        run_name = cfg.get("run_name") or os.path.split(log_dir)[-1]
 
         # Get wandb project and entity
         try:
@@ -35,8 +35,13 @@ class WandbSummaryWriter(SummaryWriter):
             entity = None
 
         # Initialize wandb
-        wandb.init(project=project, entity=entity, name=run_name)
-        wandb.config.update({"log_dir": log_dir})
+        wandb.init(
+            project=project,
+            entity=entity,
+            name=run_name,
+            config={"log_dir": log_dir},
+            settings=wandb.Settings(start_method="thread"),
+        )
 
     def store_config(self, env_cfg: dict | object, train_cfg: dict) -> None:
         wandb.config.update({"runner_cfg": train_cfg})
