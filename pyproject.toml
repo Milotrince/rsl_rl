@@ -7,8 +7,7 @@ name = "rsl-rl-lib"
 version = "3.3.0"
 keywords = ["reinforcement-learning", "robotics"]
 maintainers = [
-  { name="Clemens Schwarke", email="cschwarke@ethz.ch" },
-  { name="Mayank Mittal", email="mittalma@ethz.ch" },
+  { name="Trinity Chung", email="trinityc@cmu.edu" },
 ]
 authors = [
   { name="Clemens Schwarke", email="cschwarke@ethz.ch" },
@@ -16,7 +15,7 @@ authors = [
   { name="Nikita Rudin", email="rudinn@ethz.ch" },
   { name="David Hoeller", email="holler.david78@gmail.com" },
 ]
-description = "Fast and simple RL algorithms implemented in PyTorch"
+description = "Fork of rsl-rl from leggedrobotics: Fast and simple RL algorithms implemented in PyTorch"
 readme = { file = "README.md", content-type = "text/markdown" }
 license = "BSD-3-Clause"
 requires-python = ">=3.9"
@@ -35,8 +34,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/leggedrobotics/rsl_rl"
-Issues = "https://github.com/leggedrobotics/rsl_rl/issues"
+Homepage = "https://github.com/Milotrince/rsl_rl"
+Issues = "https://github.com/Milotrince/rsl_rl/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -1,5 +1,7 @@
 # RSL-RL
 
+> This is a fork of rsl-rl on version 3.3.0 compatible with [Eden](https://github.com/Milotrince/Eden).
+
 A fast and simple implementation of learning algorithms for robotics. For an overview of the library please have a look at https://arxiv.org/pdf/2509.10771.
 
 Environment repositories using the framework:
