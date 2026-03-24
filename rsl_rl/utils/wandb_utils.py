@@ -25,7 +25,7 @@ class WandbSummaryWriter(SummaryWriter):
         super().__init__(log_dir, flush_secs=flush_secs)
 
         # Get the run name
-        run_name = os.path.split(log_dir)[-1]
+        run_name = cfg.get("run_name") or os.path.split(log_dir)[-1]
 
         # Get wandb project and entity
         try:
