@@ -454,13 +454,18 @@ class PPO:
             }
 
         # Load the specified models
-        if load_cfg.get("actor"):
-            self.actor.load_state_dict(loaded_dict["actor_state_dict"], strict=strict)
-        if load_cfg.get("critic"):
+        if load_cfg.get("actor", False):
+            actor_key = "actor_state_dict"
+            if actor_key not in loaded_dict:
+                actor_key = "student_state_dict"
+                if actor_key not in loaded_dict:
+                    raise KeyError("Could not find actor_state_dict or student_state_dict in the loaded checkpoint.")
+            self.actor.load_state_dict(loaded_dict[actor_key], strict=strict)
+        if load_cfg.get("critic", False):
             self.critic.load_state_dict(loaded_dict["critic_state_dict"], strict=strict)
-        if load_cfg.get("optimizer"):
+        if load_cfg.get("optimizer", False):
             self.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
-        if load_cfg.get("rnd") and self.rnd:
+        if load_cfg.get("rnd", False) and self.rnd:
             self.rnd.load_state_dict(loaded_dict["rnd_state_dict"], strict=strict)
             self.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
         return load_cfg.get("iteration", False)
