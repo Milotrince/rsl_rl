@@ -8,12 +8,34 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from tensordict import TensorDict
 
 from rsl_rl.env import VecEnv
 from rsl_rl.models import MLPModel
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import resolve_callable, resolve_obs_groups, resolve_optimizer
+
+
+class AuxiliaryLoss(nn.Module, ABC):
+    """Interface for task-specific auxiliary losses used during distillation."""
+
+    @abstractmethod
+    def setup(
+        self,
+        student: MLPModel,
+        obs: TensorDict,
+        obs_groups: dict[str, list[str]],
+        device: str,
+    ) -> Iterable[nn.Parameter]:
+        """Initialize any auxiliary modules and return parameters to optimize with the student."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def compute(self, batch: RolloutStorage.Batch, student: MLPModel) -> dict[str, torch.Tensor]:
+        """Return named scalar auxiliary losses for the current distillation batch."""
+        raise NotImplementedError
 
 
 class Distillation:
@@ -40,6 +62,8 @@ class Distillation:
         loss_type: str = "mse",
         optimizer: str = "adam",
         device: str = "cpu",
+        auxiliary_losses: list[AuxiliaryLoss] | None = None,
+        auxiliary_parameters: Iterable[nn.Parameter] | None = None,
         # Distributed training parameters
         multi_gpu_cfg: dict | None = None,
         **kwargs: dict,  # handle unused config parameters
@@ -60,9 +84,13 @@ class Distillation:
         # Distillation components
         self.student = student.to(self.device)
         self.teacher = teacher.to(self.device)
+        self.auxiliary_losses = list(auxiliary_losses or [])
+        self.auxiliary_parameters = list(auxiliary_parameters or [])
+        self._optimizer_parameters = self._collect_optimizer_parameters()
 
         # Create the optimizer
-        self.optimizer = resolve_optimizer(optimizer)(self.student.parameters(), lr=learning_rate)  # type: ignore
+        optimizer_parameters = self._optimizer_parameters if self.auxiliary_losses else self.student.parameters()
+        self.optimizer = resolve_optimizer(optimizer)(optimizer_parameters, lr=learning_rate)  # type: ignore
 
         # Add storage
         self.storage = storage
@@ -120,6 +148,7 @@ class Distillation:
         """Run optimization epochs over stored batches and return mean losses."""
         self.num_updates += 1
         mean_behavior_loss = 0
+        mean_auxiliary_losses: dict[str, float] = {}
         loss = 0
         cnt = 0
 
@@ -133,9 +162,18 @@ class Distillation:
 
                 # Behavior cloning loss
                 behavior_loss = self.loss_fn(actions, batch.privileged_actions)
+                batch_loss = behavior_loss
+
+                # Auxiliary losses
+                for auxiliary_loss in self.auxiliary_losses:
+                    auxiliary_loss_dict = auxiliary_loss.compute(batch, self.student)
+                    for name, auxiliary_loss_value in auxiliary_loss_dict.items():
+                        batch_loss = batch_loss + auxiliary_loss_value
+                        key = f"aux/{name}"
+                        mean_auxiliary_losses[key] = mean_auxiliary_losses.get(key, 0.0) + auxiliary_loss_value.item()
 
                 # Total loss
-                loss = loss + behavior_loss
+                loss = loss + batch_loss
                 mean_behavior_loss += behavior_loss.item()
                 cnt += 1
 
@@ -146,7 +184,7 @@ class Distillation:
                     if self.is_multi_gpu:
                         self.reduce_parameters()
                     if self.max_grad_norm:
-                        nn.utils.clip_grad_norm_(self.student.parameters(), self.max_grad_norm)
+                        nn.utils.clip_grad_norm_(self._optimizer_parameters, self.max_grad_norm)
                     self.optimizer.step()
                     self.student.detach_hidden_state()
                     loss = 0
@@ -157,18 +195,23 @@ class Distillation:
                 self.student.detach_hidden_state(batch.dones.view(-1))
 
         mean_behavior_loss /= cnt
+        for key in mean_auxiliary_losses:
+            mean_auxiliary_losses[key] /= cnt
         self.storage.clear()
         self.last_hidden_states = (self.student.get_hidden_state(), self.teacher.get_hidden_state())
         self.student.detach_hidden_state()
 
         # Construct the loss dictionary
         loss_dict = {"behavior": mean_behavior_loss}
+        loss_dict.update(mean_auxiliary_losses)
 
         return loss_dict
 
     def train_mode(self) -> None:
         """Set train mode for the student and keep the teacher in eval mode."""
         self.student.train()
+        for auxiliary_loss in self.auxiliary_losses:
+            auxiliary_loss.train()
         # Teacher is always in eval mode
         self.teacher.eval()
 
@@ -176,6 +219,8 @@ class Distillation:
         """Set evaluation mode for student and teacher models."""
         self.student.eval()
         self.teacher.eval()
+        for auxiliary_loss in self.auxiliary_losses:
+            auxiliary_loss.eval()
 
     def save(self) -> dict:
         """Return a dict of all models for saving."""
@@ -184,6 +229,10 @@ class Distillation:
             "teacher_state_dict": self.teacher.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
         }
+        if self.auxiliary_losses:
+            saved_dict["auxiliary_loss_state_dicts"] = [
+                auxiliary_loss.state_dict() for auxiliary_loss in self.auxiliary_losses
+            ]
         return saved_dict
 
     def load(self, loaded_dict: dict, load_cfg: dict | None, strict: bool) -> bool:
@@ -195,6 +244,7 @@ class Distillation:
             load_cfg = {
                 "student": True,
                 "teacher": True,
+                "auxiliary_losses": bool(self.auxiliary_losses),
                 "optimizer": True,
                 "iteration": True,
             }
@@ -207,6 +257,15 @@ class Distillation:
                 loaded_dict.get("teacher_state_dict") or loaded_dict["actor_state_dict"], strict=strict
             )
             self.teacher_loaded = True
+        if load_cfg.get("auxiliary_losses"):
+            auxiliary_loss_state_dicts = loaded_dict["auxiliary_loss_state_dicts"]
+            if len(auxiliary_loss_state_dicts) != len(self.auxiliary_losses):
+                raise ValueError(
+                    f"Expected {len(self.auxiliary_losses)} auxiliary loss state dicts, "
+                    f"got {len(auxiliary_loss_state_dicts)}."
+                )
+            for auxiliary_loss, auxiliary_loss_state_dict in zip(self.auxiliary_losses, auxiliary_loss_state_dicts):
+                auxiliary_loss.load_state_dict(auxiliary_loss_state_dict, strict=strict)
         if load_cfg.get("optimizer"):
             self.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
         return load_cfg.get("iteration", False)
@@ -248,22 +307,89 @@ class Distillation:
         # Initialize the storage
         storage = RolloutStorage("distillation", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions], device)
 
+        # Initialize auxiliary losses before the optimizer is created
+        auxiliary_loss_cfgs = cfg["algorithm"].pop("auxiliary_losses", None)
+        auxiliary_losses, auxiliary_parameters = Distillation._construct_auxiliary_losses(
+            auxiliary_loss_cfgs, student, obs, cfg["obs_groups"], device
+        )
+
         # Initialize the algorithm
         alg: Distillation = alg_class(
-            student, teacher, storage, device=device, **cfg["algorithm"], multi_gpu_cfg=cfg["multi_gpu"]
+            student,
+            teacher,
+            storage,
+            device=device,
+            auxiliary_losses=auxiliary_losses,
+            auxiliary_parameters=auxiliary_parameters,
+            **cfg["algorithm"],
+            multi_gpu_cfg=cfg["multi_gpu"],
         )
 
         return alg
+
+    @staticmethod
+    def _construct_auxiliary_losses(
+        auxiliary_loss_cfgs: list[dict] | None,
+        student: MLPModel,
+        obs: TensorDict,
+        obs_groups: dict[str, list[str]],
+        device: str,
+    ) -> tuple[list[AuxiliaryLoss], list[nn.Parameter]]:
+        """Instantiate configured auxiliary losses and collect optimizer parameters."""
+        if not auxiliary_loss_cfgs:
+            return [], []
+
+        auxiliary_losses: list[AuxiliaryLoss] = []
+        auxiliary_parameters: list[nn.Parameter] = []
+        for auxiliary_loss_cfg in auxiliary_loss_cfgs:
+            if "class_name" not in auxiliary_loss_cfg:
+                raise ValueError("Each auxiliary loss config must contain a 'class_name' entry.")
+
+            auxiliary_loss_kwargs = dict(auxiliary_loss_cfg)
+            auxiliary_loss_class = resolve_callable(auxiliary_loss_kwargs.pop("class_name"))
+            auxiliary_loss = auxiliary_loss_class(**auxiliary_loss_kwargs)
+            if not isinstance(auxiliary_loss, AuxiliaryLoss):
+                raise TypeError(
+                    f"Auxiliary loss '{auxiliary_loss_class}' must inherit from "
+                    "rsl_rl.algorithms.distillation.AuxiliaryLoss."
+                )
+
+            auxiliary_loss.to(device)
+            setup_parameters = list(auxiliary_loss.setup(student, obs, obs_groups, device))
+            auxiliary_loss.to(device)
+            student.to(device)
+
+            auxiliary_losses.append(auxiliary_loss)
+            auxiliary_parameters.extend(setup_parameters)
+
+        return auxiliary_losses, auxiliary_parameters
+
+    def _collect_optimizer_parameters(self) -> list[nn.Parameter]:
+        """Return student and auxiliary parameters without duplicates."""
+        parameters: list[nn.Parameter] = []
+        seen: set[int] = set()
+        for parameter in [*self.student.parameters(), *self.auxiliary_parameters]:
+            parameter_id = id(parameter)
+            if parameter_id in seen:
+                continue
+            parameters.append(parameter)
+            seen.add(parameter_id)
+        return parameters
 
     def broadcast_parameters(self) -> None:
         """Broadcast model parameters to all GPUs."""
         # Obtain the model parameters on current GPU
         model_params = [self.student.state_dict(), self.teacher.state_dict()]
+        if self.auxiliary_losses:
+            model_params.append([auxiliary_loss.state_dict() for auxiliary_loss in self.auxiliary_losses])
         # Broadcast the model parameters
         torch.distributed.broadcast_object_list(model_params, src=0)
         # Load the model parameters on all GPUs from source GPU
         self.student.load_state_dict(model_params[0])
         self.teacher.load_state_dict(model_params[1])
+        if self.auxiliary_losses:
+            for auxiliary_loss, auxiliary_loss_state_dict in zip(self.auxiliary_losses, model_params[2]):
+                auxiliary_loss.load_state_dict(auxiliary_loss_state_dict)
 
     def reduce_parameters(self) -> None:
         """Collect gradients from all GPUs and average them.
@@ -271,14 +397,14 @@ class Distillation:
         This function is called after the backward pass to synchronize the gradients across all GPUs.
         """
         # Create a tensor to store the gradients
-        grads = [param.grad.view(-1) for param in self.student.parameters() if param.grad is not None]
+        grads = [param.grad.view(-1) for param in self._optimizer_parameters if param.grad is not None]
         all_grads = torch.cat(grads)
         # Average the gradients across all GPUs
         torch.distributed.all_reduce(all_grads, op=torch.distributed.ReduceOp.SUM)
         all_grads /= self.gpu_world_size
         # Update the gradients for all parameters with the reduced gradients
         offset = 0
-        for param in self.student.parameters():
+        for param in self._optimizer_parameters:
             if param.grad is not None:
                 numel = param.numel()
                 # Copy data back from shared buffer
