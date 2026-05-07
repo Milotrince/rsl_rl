@@ -212,6 +212,45 @@ class TestPreEncodeRecurrentLatent:
         model, _obs = _make_pre_encode_recurrent()
         assert model.rnn.rnn.input_size == PROPRIO_DIM + ENCODED_TACTILE_DIM
 
+    def test_all_encoded_padded_minibatch_preserves_leading_dims(self) -> None:
+        obs = TensorDict(
+            {
+                "tactile": torch.randn(NUM_ENVS, RAW_TACTILE_DIM),
+                "proprioception": torch.randn(NUM_ENVS, PROPRIO_DIM),
+            },
+            batch_size=[NUM_ENVS],
+        )
+        obs_groups = {"actor": ["proprioception", "tactile"]}
+        model = PreEncodeRecurrentModel(
+            obs,
+            obs_groups,
+            "actor",
+            NUM_ACTIONS,
+            hidden_dims=[32, 32],
+            encoder_cfg={
+                "proprioception": {"hidden_dims": [16], "output_dim": 6},
+                "tactile": dict(ENCODER_CFG["tactile"]),
+            },
+            rnn_type="gru",
+            rnn_hidden_dim=RNN_HIDDEN,
+            rnn_num_layers=1,
+        )
+        time_steps = 3
+        trajectory_batch = 4
+        padded_obs = TensorDict(
+            {
+                "tactile": torch.randn(time_steps, trajectory_batch, RAW_TACTILE_DIM),
+                "proprioception": torch.randn(time_steps, trajectory_batch, PROPRIO_DIM),
+            },
+            batch_size=[time_steps, trajectory_batch],
+        )
+        masks = torch.ones(time_steps, trajectory_batch, dtype=torch.bool)
+        hidden_state = torch.zeros(1, trajectory_batch, RNN_HIDDEN)
+
+        latent = model.get_latent(padded_obs, masks=masks, hidden_state=hidden_state)
+
+        assert latent.shape == (time_steps, trajectory_batch, RNN_HIDDEN)
+
     def test_hidden_state_accumulates(self) -> None:
         model, obs = _make_pre_encode_recurrent()
         out_fresh = model(obs).detach().clone()

@@ -119,7 +119,7 @@ class PreEncodeMixin:
     def _empty_feature(self, obs: TensorDict) -> torch.Tensor:
         g = self.obs_groups[0] if self.obs_groups else self.obs_groups_encode[0]
         x = obs[g]
-        return x.new_zeros(x.shape[0], 0)
+        return x.new_zeros((*x.shape[:-1], 0))
 
     def _pre_encode_get_obs_dim(
         self,
