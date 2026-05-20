@@ -14,6 +14,7 @@ from tensordict import TensorDict
 
 from rsl_rl.env import VecEnv
 from rsl_rl.models import MLPModel
+from rsl_rl.modules import EmpiricalNormalization
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import resolve_callable, resolve_obs_groups, resolve_optimizer
 
@@ -62,6 +63,8 @@ class Distillation:
         loss_type: str = "mse",
         optimizer: str = "adam",
         device: str = "cpu",
+        normalize_action_targets: bool = False,
+        num_actions: int | None = None,
         auxiliary_losses: list[AuxiliaryLoss] | None = None,
         auxiliary_parameters: Iterable[nn.Parameter] | None = None,
         # Distributed training parameters
@@ -115,11 +118,25 @@ class Distillation:
 
         self.num_updates = 0
 
+        # Action-target normalization: standardizes teacher actions per-dim so the behavior loss
+        # becomes an inverse-variance-weighted MSE. This keeps small, task-critical corrections
+        # from being drowned out by larger idle-pose actions in precision tasks.
+        self.normalize_action_targets = normalize_action_targets
+        if normalize_action_targets:
+            if num_actions is None:
+                raise ValueError("num_actions must be provided when normalize_action_targets is enabled.")
+            self.action_normalizer: nn.Module = EmpiricalNormalization(num_actions).to(self.device)
+        else:
+            self.action_normalizer = nn.Identity()
+
     def act(self, obs: TensorDict) -> torch.Tensor:
         """Sample actions and store transition data."""
         # Compute the actions
         self.transition.actions = self.student(obs, stochastic_output=True).detach()
         self.transition.privileged_actions = self.teacher(obs).detach()
+        # Update running statistics of the teacher actions used for target normalization
+        if self.normalize_action_targets:
+            self.action_normalizer.update(self.transition.privileged_actions)
         # Record the observations
         self.transition.observations = obs
         return self.transition.actions  # type: ignore
@@ -160,8 +177,11 @@ class Distillation:
                 # Inference of the student for gradient computation
                 actions = self.student(batch.observations)
 
-                # Behavior cloning loss
-                behavior_loss = self.loss_fn(actions, batch.privileged_actions)
+                # Behavior cloning loss (action targets optionally standardized per-dim)
+                behavior_loss = self.loss_fn(
+                    self.action_normalizer(actions),
+                    self.action_normalizer(batch.privileged_actions),
+                )
                 batch_loss = behavior_loss
 
                 # Auxiliary losses
@@ -210,6 +230,7 @@ class Distillation:
     def train_mode(self) -> None:
         """Set train mode for the student and keep the teacher in eval mode."""
         self.student.train()
+        self.action_normalizer.train()
         for auxiliary_loss in self.auxiliary_losses:
             auxiliary_loss.train()
         # Teacher is always in eval mode
@@ -219,6 +240,7 @@ class Distillation:
         """Set evaluation mode for student and teacher models."""
         self.student.eval()
         self.teacher.eval()
+        self.action_normalizer.eval()
         for auxiliary_loss in self.auxiliary_losses:
             auxiliary_loss.eval()
 
@@ -229,6 +251,8 @@ class Distillation:
             "teacher_state_dict": self.teacher.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
         }
+        if self.normalize_action_targets:
+            saved_dict["action_normalizer_state_dict"] = self.action_normalizer.state_dict()
         if self.auxiliary_losses:
             saved_dict["auxiliary_loss_state_dicts"] = [
                 auxiliary_loss.state_dict() for auxiliary_loss in self.auxiliary_losses
@@ -252,6 +276,9 @@ class Distillation:
         # Load the specified models
         if load_cfg.get("student"):
             self.student.load_state_dict(loaded_dict["student_state_dict"], strict=strict)
+            # Restore action-target normalization stats if present (guarded for older checkpoints)
+            if self.normalize_action_targets and "action_normalizer_state_dict" in loaded_dict:
+                self.action_normalizer.load_state_dict(loaded_dict["action_normalizer_state_dict"], strict=strict)
         if load_cfg.get("teacher"):
             self.teacher.load_state_dict(
                 loaded_dict.get("teacher_state_dict") or loaded_dict["actor_state_dict"], strict=strict
@@ -319,6 +346,7 @@ class Distillation:
             teacher,
             storage,
             device=device,
+            num_actions=env.num_actions,
             auxiliary_losses=auxiliary_losses,
             auxiliary_parameters=auxiliary_parameters,
             **cfg["algorithm"],
