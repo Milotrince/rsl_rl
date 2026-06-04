@@ -6,5 +6,15 @@
 """Storage for the learning algorithms."""
 
 from .rollout_storage import RolloutStorage
+from .sapg_rollout_storage import (
+    SapgBatchBundle,
+    sapg_mini_batch_generator,
+    sapg_recurrent_mini_batch_generator,
+)
 
-__all__ = ["RolloutStorage"]
+__all__ = [
+    "RolloutStorage",
+    "SapgBatchBundle",
+    "sapg_mini_batch_generator",
+    "sapg_recurrent_mini_batch_generator",
+]

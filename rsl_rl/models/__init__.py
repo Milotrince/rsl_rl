@@ -9,6 +9,7 @@ from .cnn_model import CNNModel
 from .mlp_model import MLPModel
 from .pre_encode_model import PreEncodeMLPModel, PreEncodeRecurrentModel
 from .rnn_model import RNNModel
+from .sapg_model import SAPGModel
 
 __all__ = [
     "CNNModel",
@@ -16,4 +17,5 @@ __all__ = [
     "PreEncodeMLPModel",
     "PreEncodeRecurrentModel",
     "RNNModel",
+    "SAPGModel",
 ]

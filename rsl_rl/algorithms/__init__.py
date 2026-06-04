@@ -7,5 +7,6 @@
 
 from .distillation import AuxiliaryLoss, Distillation
 from .ppo import PPO
+from .sapg import SAPG
 
-__all__ = ["PPO", "AuxiliaryLoss", "Distillation"]
+__all__ = ["PPO", "SAPG", "AuxiliaryLoss", "Distillation"]
