@@ -90,7 +90,9 @@ class SAPG(PPO):
             num_blocks: Number of policy blocks ``M``. ``num_envs`` must be divisible by it.
             aggregation: One of ``"leader_follower"``, ``"symmetric"`` or ``"none"``.
             off_policy_ratio: Number of follower blocks aggregated per leader, per update.
-            off_policy_loss_coef: Weight ``lambda`` on the off-policy surrogate term (Eq. 4).
+            off_policy_loss_coef: Per-sample weight ``lambda`` applied to off-policy samples
+                inside the single (uniform) surrogate mean (Eq. 4). ``1.0`` reproduces the
+                reference exactly (off-policy weight then scales with ``off_policy_ratio``).
             latent_dim: Dimension of the per-block latent code (even).
             latent_scale: Spread of the per-block scalar fed to the sinusoidal encoding.
             latent_n: Base of the sinusoidal encoding.
@@ -382,14 +384,26 @@ class SAPG(PPO):
             # Surrogate (clipped) objective. The PPO clip ratio between the current
             # policy (under the imposed latent) and the behavior log-prob is exactly
             # the off-policy importance weight (Eq. 3), so off-policy samples enter
-            # the same surrogate, weighted by ``off_policy_loss_coef`` (Eq. 4).
+            # the same surrogate. The reference SAPG takes a *single uniform mean*
+            # over the concatenated on+off batch — off-policy weight is then
+            # proportional to its sample volume (set by ``off_policy_ratio``), and
+            # the surrogate keeps the same scale as plain PPO. We preserve that, and
+            # optionally scale each off-policy sample by ``off_policy_loss_coef``
+            # (``lambda`` in Eq. 4) *before* the mean, so the loss scale and the
+            # on/off volume ratio stay intact (``off_policy_loss_coef == 1.0`` is the
+            # reference exactly). Taking separate per-group means instead would
+            # over-weight off-policy data by ~num_blocks/off_policy_ratio and inflate
+            # the surrogate magnitude, silently rescaling the value/entropy balance.
             ratio = torch.exp(actions_log_prob - old_log_prob)
             surrogate = -advantages * ratio
             surrogate_clipped = -advantages * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
             per_sample_surrogate = torch.max(surrogate, surrogate_clipped)
-            on_term = per_sample_surrogate[~offpolicy].mean() if (~offpolicy).any() else 0.0
-            off_term = per_sample_surrogate[offpolicy].mean() if offpolicy.any() else 0.0
-            surrogate_loss = on_term + self.off_policy_loss_coef * off_term
+            if self.off_policy_loss_coef != 1.0:
+                sample_weight = torch.ones_like(per_sample_surrogate)
+                sample_weight[offpolicy] = self.off_policy_loss_coef
+                surrogate_loss = (sample_weight * per_sample_surrogate).mean()
+            else:
+                surrogate_loss = per_sample_surrogate.mean()
 
             # Value loss (clipped), over all samples.
             if self.use_clipped_value_loss:
@@ -414,7 +428,7 @@ class SAPG(PPO):
             self.optimizer.step()
 
             mean_value_loss += value_loss.item()
-            mean_surrogate_loss += surrogate_loss.detach().item() if torch.is_tensor(surrogate_loss) else float(surrogate_loss)
+            mean_surrogate_loss += surrogate_loss.detach().item()
             mean_entropy += entropy.mean().item()
             mean_offpolicy_frac += offpolicy.float().mean().item()
 
