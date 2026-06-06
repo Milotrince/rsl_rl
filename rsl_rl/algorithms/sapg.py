@@ -96,8 +96,10 @@ class SAPG(PPO):
             latent_dim: Dimension of the per-block latent code (even).
             latent_scale: Spread of the per-block scalar fed to the sinusoidal encoding.
             latent_n: Base of the sinusoidal encoding.
-            entropy_coef_range: Per-block entropy spread. Block 0 (leader) uses the base
-                ``entropy_coef``; the last block uses ``entropy_coef + entropy_coef_range``.
+            entropy_coef_range: Per-block entropy spread. Block 0 (leader) uses the HIGHEST
+                coefficient ``entropy_coef + entropy_coef_range``; the last (most
+                exploitative) block uses the base ``entropy_coef``. Keeping the leader
+                stochastic is what stabilizes the off-policy importance weighting.
             ppo_kwargs: Forwarded to :class:`~rsl_rl.algorithms.PPO`.
         """
         super().__init__(actor, critic, storage, **ppo_kwargs)
@@ -135,14 +137,21 @@ class SAPG(PPO):
         block_id = torch.arange(self.num_blocks, device=device).repeat_interleave(self.block_size)
         self.env_block_id = block_id  # [num_envs]
 
-        # Per-block scalar -> sinusoidal latent code. Block 0 (leader) is the
-        # "exploiter"; later blocks get a higher entropy coefficient (explore more).
+        # Per-block scalar -> sinusoidal latent code.
         block_scalar = torch.linspace(self.latent_scale, 0.0, self.num_blocks, device=device)
         self.block_latent = create_sinusoidal_encoding(block_scalar, self.latent_dim, self.latent_n)  # [M, D]
         self.env_latent = self.block_latent[block_id]  # [num_envs, D]
 
+        # Per-block entropy coefficient. Block 0 is the *leader* (aggregation target,
+        # trained on its own + relabeled follower data). The reference gives the leader
+        # the HIGHEST entropy (linspace(0.5, 0.0, M) * scale) and decreases it toward the
+        # most-exploitative follower. This is critical: a low-entropy leader sharpens
+        # toward near-deterministic, which makes the off-policy importance ratios
+        # (pi_leader / pi_follower) on relabeled data explode in variance and destroys the
+        # policy. So block 0 = ``entropy_coef + entropy_coef_range`` (max), last block =
+        # ``entropy_coef`` (min).
         block_entropy = self.entropy_coef + torch.linspace(
-            0.0, self.entropy_coef_range, self.num_blocks, device=device
+            self.entropy_coef_range, 0.0, self.num_blocks, device=device
         )
         self.block_entropy_coef = block_entropy  # [M]
         self.env_entropy_coef = block_entropy[block_id]  # [num_envs]
